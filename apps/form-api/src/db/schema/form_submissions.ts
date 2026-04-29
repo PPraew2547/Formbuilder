@@ -4,7 +4,13 @@ export const formSubmissions = pgTable('form_submissions', {
   id: uuid('id').defaultRandom().primaryKey(),
   formId: uuid('form_id'),
   formVersionId: uuid('form_version_id'),
+
+  // pipeline status: received / validated / stored / forwarded / failed
   status: text('status'),
+
+  // admin review status: new / reviewed / archived
+  reviewStatus: text('review_status').default('new'),
+
   sourceType: text('source_type'),
   sourceUrl: text('source_url'),
   submitToken: text('submit_token'),

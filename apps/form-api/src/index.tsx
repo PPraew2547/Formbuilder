@@ -1,6 +1,6 @@
 import { db } from './db/client'
 import { forms } from './db/schema/forms'
-import { and, asc, desc, eq } from 'drizzle-orm'
+import { and, asc, desc, eq, ilike, or } from 'drizzle-orm'
 import { formFields } from './db/schema/form_fields'
 import { formRoutes } from './db/schema/form_routes'
 import { formTargets } from './db/schema/form_targets'
@@ -12,7 +12,9 @@ import { buildMappedPayload } from './mapping'
 import { Hono } from 'hono'
 import { renderer } from './renderer'
 import { cors } from 'hono/cors'
-
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { extname, join } from 'node:path'
+import crypto from 'node:crypto'
 type Variables = {
   requestId: string
 }
@@ -31,6 +33,30 @@ app.use(
     allowHeaders: ['Content-Type', 'Authorization'],
   })
 )
+
+const UPLOAD_DIR = join(process.cwd(), 'public', 'uploads')
+
+function safeFileName(originalName: string) {
+  const ext = extname(originalName || '').toLowerCase()
+  const allowedExt = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.pdf']
+
+  const finalExt = allowedExt.includes(ext) ? ext : '.bin'
+
+  return `${crypto.randomUUID()}${finalExt}`
+}
+
+function contentTypeFromName(fileName: string) {
+  const ext = extname(fileName).toLowerCase()
+
+  if (ext === '.png') return 'image/png'
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
+  if (ext === '.webp') return 'image/webp'
+  if (ext === '.gif') return 'image/gif'
+  if (ext === '.pdf') return 'application/pdf'
+
+  return 'application/octet-stream'
+}
+
 
 const submitRateLimitStore = new Map<string, { count: number; resetAt: number }>()
 
@@ -120,14 +146,35 @@ app.get('/health', (c) => {
   })
 })
 
+
 app.get('/admin/forms', async (c) => {
-  const allForms = await db
+  const q = c.req.query('q');
+
+  let query = db
     .select()
     .from(forms)
-    .where(eq(forms.isActive, true))
+    .where(eq(forms.isActive, true));
 
-  return c.json(allForms)
-})
+  if (q) {
+    query = db
+      .select()
+      .from(forms)
+      .where(
+        and(
+          eq(forms.isActive, true),
+          or(
+            ilike(forms.name, `%${q}%`),
+            ilike(forms.title, `%${q}%`),
+            ilike(forms.slug, `%${q}%`)
+          )
+        )
+      );
+  }
+
+  const result = await query;
+
+  return c.json(result);
+});
 
 app.post('/admin/forms', async (c) => {
   const body = await c.req.json()
@@ -151,9 +198,13 @@ app.post('/admin/forms', async (c) => {
 app.get('/admin/forms/:id', async (c) => {
   const id = c.req.param('id')
 
-  const form = await db.select().from(forms).where(eq(forms.id, id))
+  const formRows = await db
+    .select()
+    .from(forms)
+    .where(eq(forms.id, id))
+    .limit(1)
 
-  if (form.length === 0) {
+  if (formRows.length === 0) {
     return c.json(
       {
         success: false,
@@ -166,7 +217,19 @@ app.get('/admin/forms/:id', async (c) => {
     )
   }
 
-  return c.json(form[0])
+  const fieldRows = await db
+    .select()
+    .from(formFields)
+    .where(eq(formFields.formId, id))
+    .orderBy(asc(formFields.sortOrder))
+
+  return c.json({
+    success: true,
+    data: {
+      ...formRows[0],
+      fields: fieldRows,
+    },
+  })
 })
 
 app.put('/admin/forms/:id', async (c) => {
@@ -180,7 +243,9 @@ app.put('/admin/forms/:id', async (c) => {
       title: body.title,
       description: body.description,
       locale: body.locale,
+      status: body.status,
       isActive: body.isActive,
+      updatedAt: new Date(),
     })
     .where(eq(forms.id, id))
     .returning()
@@ -200,6 +265,7 @@ app.put('/admin/forms/:id', async (c) => {
 
   return c.json(updatedForm[0])
 })
+
 
 app.delete('/admin/forms/:id', async (c) => {
   const id = c.req.param('id')
@@ -428,6 +494,94 @@ app.delete('/admin/routes/:id', async (c) => {
   })
 })
 
+app.get('/admin/forms/:id/targets', async (c) => {
+  const formId = c.req.param('id')
+
+  const targets = await db
+    .select()
+    .from(formTargets)
+    .where(eq(formTargets.formId, formId))
+    .orderBy(asc(formTargets.priority))
+
+  return c.json({
+    success: true,
+    data: targets,
+  })
+})
+app.get('/admin/forms/:id/routes', async (c) => {
+  const formId = c.req.param('id')
+
+  const routes = await db
+    .select()
+    .from(formRoutes)
+    .where(eq(formRoutes.formId, formId))
+    .orderBy(asc(formRoutes.priority))
+
+  return c.json({
+    success: true,
+    data: routes,
+  })
+})
+app.post('/admin/forms/:id/routes', async (c) => {
+  const formId = c.req.param('id')
+  const body = await c.req.json()
+
+  const created = await db
+    .insert(formRoutes)
+    .values({
+      formId,
+      siteId: body.siteId ?? null,
+      matchType: body.matchType ?? 'exact',
+      urlPattern: body.urlPattern,
+      priority: body.priority ?? 1,
+      isActive: body.isActive ?? true,
+      startAt: body.startAt ? new Date(body.startAt) : null,
+      endAt: body.endAt ? new Date(body.endAt) : null,
+    })
+    .returning()
+
+  return c.json({
+    success: true,
+    data: created[0],
+  })
+})
+app.put('/admin/routes/:id', async (c) => {
+  const id = c.req.param('id')
+  const body = await c.req.json()
+
+  const updated = await db
+    .update(formRoutes)
+    .set({
+      siteId: body.siteId ?? null,
+      matchType: body.matchType ?? 'exact',
+      urlPattern: body.urlPattern,
+      priority: body.priority ?? 1,
+      isActive: body.isActive ?? true,
+      startAt: body.startAt ? new Date(body.startAt) : null,
+      endAt: body.endAt ? new Date(body.endAt) : null,
+      updatedAt: new Date(),
+    })
+    .where(eq(formRoutes.id, id))
+    .returning()
+
+  if (updated.length === 0) {
+    return c.json(
+      {
+        success: false,
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Route not found',
+        },
+      },
+      404,
+    )
+  }
+
+  return c.json({
+    success: true,
+    data: updated[0],
+  })
+})
 app.post('/admin/forms/:id/targets', async (c) => {
   const formId = c.req.param('id')
   const body = await c.req.json()
@@ -565,6 +719,17 @@ app.post('/admin/forms/:id/versions/publish', async (c) => {
       isPublished: true,
     })
     .returning()
+    
+
+    await db
+  .update(forms)
+  .set({
+    status: 'published',
+    isActive: true,
+    updatedAt: new Date(),
+  })
+  .where(eq(forms.id, formId))
+
 
   return c.json(publishedVersion[0])
 })
@@ -648,6 +813,7 @@ app.get('/admin/forms/:id/submissions', async (c) => {
   const formId = c.req.param('id')
   const status = c.req.query('status')
   const forwardStatus = c.req.query('forwardStatus')
+  const reviewStatus = c.req.query('reviewStatus')
 
   let rows = await db
     .select()
@@ -661,6 +827,10 @@ app.get('/admin/forms/:id/submissions', async (c) => {
 
   if (forwardStatus) {
     rows = rows.filter((row) => row.forwardStatus === forwardStatus)
+  }
+
+  if (reviewStatus) {
+    rows = rows.filter((row) => row.reviewStatus === reviewStatus)
   }
 
   return c.json({
@@ -712,6 +882,53 @@ app.get('/admin/submissions/:submissionId', async (c) => {
       attempts,
       events,
     },
+  })
+})
+
+app.put('/admin/submissions/:id/review-status', async (c) => {
+  const id = c.req.param('id')
+  const body = await c.req.json()
+
+  const reviewStatus = body.reviewStatus
+
+  if (!['new', 'reviewed', 'archived'].includes(reviewStatus)) {
+    return c.json(
+      {
+        success: false,
+        error: {
+          code: 'INVALID_REVIEW_STATUS',
+          message: 'reviewStatus must be new, reviewed, or archived',
+        },
+      },
+      400
+    )
+  }
+
+  const updated = await db
+    .update(formSubmissions)
+    .set({
+      reviewStatus,
+      updatedAt: new Date(),
+    })
+    .where(eq(formSubmissions.id, id))
+    .returning()
+
+  if (updated.length === 0) {
+    return c.json(
+      {
+        success: false,
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Submission not found',
+        },
+      },
+      404
+    )
+  }
+
+  return c.json({
+    success: true,
+    data: updated[0],
   })
 })
 
@@ -1085,10 +1302,43 @@ app.get('/public/form-resolver', async (c) => {
   })
 })
 
+app.get('/admin/forms/by-slug/:slug', async (c) => {
+  const slug = c.req.param('slug')
+
+  const result = await db
+    .select()
+    .from(forms)
+    .where(eq(forms.slug, slug))
+
+  if (result.length === 0) {
+    return c.json(
+      {
+        success: false,
+        message: 'Form not found',
+      },
+      404
+    )
+  }
+
+  return c.json({
+    success: true,
+    data: result[0],
+  })
+})
+
 app.get('/public/forms/:slug', async (c) => {
   const slug = c.req.param('slug')
 
-  const form = await db.select().from(forms).where(eq(forms.slug, slug))
+const form = await db
+  .select()
+  .from(forms)
+  .where(
+    and(
+      eq(forms.slug, slug),
+      eq(forms.status, 'published'),
+      eq(forms.isActive, true)
+    )
+  )
 
   if (form.length === 0) {
     return c.json(
@@ -1106,7 +1356,12 @@ app.get('/public/forms/:slug', async (c) => {
   const publishedVersion = await db
     .select()
     .from(formVersions)
-    .where(and(eq(formVersions.formId, form[0].id), eq(formVersions.isPublished, true)))
+    .where(
+      and(
+        eq(formVersions.formId, form[0].id),
+        eq(formVersions.isPublished, true)
+      )
+    )
 
   if (publishedVersion.length === 0) {
     return c.json(
@@ -1134,6 +1389,100 @@ app.get('/public/forms/:slug', async (c) => {
       },
     },
   })
+})
+
+app.post('/public/uploads', async (c) => {
+  const body = await c.req.parseBody()
+  const file = body.file
+
+  if (!(file instanceof File)) {
+    return c.json(
+      {
+        success: false,
+        error: {
+          code: 'NO_FILE',
+          message: 'No file uploaded',
+        },
+      },
+      400
+    )
+  }
+
+  const maxSize = 5 * 1024 * 1024
+
+  if (file.size > maxSize) {
+    return c.json(
+      {
+        success: false,
+        error: {
+          code: 'FILE_TOO_LARGE',
+          message: 'File must be smaller than 5MB',
+        },
+      },
+      400
+    )
+  }
+
+  const allowedTypes = [
+    'image/png',
+    'image/jpeg',
+    'image/webp',
+    'image/gif',
+    'application/pdf',
+  ]
+
+  if (!allowedTypes.includes(file.type)) {
+    return c.json(
+      {
+        success: false,
+        error: {
+          code: 'INVALID_FILE_TYPE',
+          message: 'Only PNG, JPG, WEBP, GIF, or PDF files are allowed',
+        },
+      },
+      400
+    )
+  }
+
+  await mkdir(UPLOAD_DIR, { recursive: true })
+
+  const fileName = safeFileName(file.name)
+  const filePath = join(UPLOAD_DIR, fileName)
+
+  const buffer = Buffer.from(await file.arrayBuffer())
+  await writeFile(filePath, buffer)
+
+  return c.json({
+    success: true,
+    data: {
+      fileName,
+      originalName: file.name,
+      size: file.size,
+      type: file.type,
+      url: `/uploads/${fileName}`,
+    },
+  })
+})
+
+app.get('/uploads/:fileName', async (c) => {
+  const fileName = c.req.param('fileName')
+
+  if (fileName.includes('/') || fileName.includes('\\')) {
+    return c.text('Invalid file name', 400)
+  }
+
+  try {
+    const filePath = join(UPLOAD_DIR, fileName)
+    const data = await readFile(filePath)
+
+    return new Response(data, {
+      headers: {
+        'Content-Type': contentTypeFromName(fileName),
+      },
+    })
+  } catch {
+    return c.text('File not found', 404)
+  }
 })
 
 app.post('/public/forms/:slug/submit', async (c) => {
@@ -1193,10 +1542,16 @@ app.post('/public/forms/:slug/submit', async (c) => {
   }
 
   const formRows = await db
-    .select()
-    .from(forms)
-    .where(eq(forms.slug, slug))
-    .limit(1)
+  .select()
+  .from(forms)
+  .where(
+    and(
+      eq(forms.slug, slug),
+      eq(forms.status, 'published'),
+      eq(forms.isActive, true)
+    )
+  )
+  .limit(1)
 
   if (formRows.length === 0) {
     return c.json(

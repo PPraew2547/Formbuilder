@@ -155,8 +155,25 @@ export default function MainLayout({ children }: { children: ReactNode }): React
         <div style={bottomArea}>
           {menuOpen && (
             <div style={dropMenu}>
-              <button style={dropItem()} onClick={() => setMenuOpen(false)}>👤 Profile</button>
-              <button style={dropItem()} onClick={() => setMenuOpen(false)}>⚙ Settings</button>
+              <button
+  style={dropItem()}
+  onClick={() => {
+    setMenuOpen(false);
+    navigate("/profile");
+  }}
+>
+  👤 Profile
+</button>
+
+<button
+  style={dropItem()}
+  onClick={() => {
+    setMenuOpen(false);
+    navigate("/settings");
+  }}
+>
+  ⚙ Settings
+</button>
               <div style={{ height: 1, background: "rgba(255,255,255,0.06)", margin: "2px 0" }} />
               <button style={dropItem(true)} onClick={handleLogout}>⎋ Sign out</button>
             </div>

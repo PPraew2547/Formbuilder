@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { formApi } from "../api.ts";
-import type { FormField, FormSummary } from "../api.ts";
+import { formApi, targetApi, routeApi } from "../api.ts";
+import type { FormField, FormSummary, FormTarget, FormRoute } from "../api.ts";
 import { Switch } from "antd";
 
 const PURPLE = "linear-gradient(135deg,#667eea,#764ba2)";
@@ -68,6 +68,32 @@ export default function FieldBuilder() {
   const [published, setPublished] = useState(false);
   const [saveError, setSaveError] = useState("");
 
+  const [targetId, setTargetId] = useState<string | null>(null);
+  const [targetEnabled, setTargetEnabled] = useState(false);
+  const [targetUrl, setTargetUrl] = useState("");
+  const [targetMethod, setTargetMethod] = useState<FormTarget["httpMethod"]>("POST");
+  const [targetHeadersText, setTargetHeadersText] = useState("{}");
+  const [targetMappingText, setTargetMappingText] = useState(
+    JSON.stringify(
+      {
+        fieldMap: {},
+        staticValues: {
+          source: "form-builder",
+        },
+      },
+      null,
+      2,
+    ),
+  );
+  const [targetError, setTargetError] = useState("");
+
+  const [routeId, setRouteId] = useState<string | null>(null);
+  const [routeEnabled, setRouteEnabled] = useState(false);
+  const [routeMatchType, setRouteMatchType] = useState<FormRoute["matchType"]>("exact");
+  const [routeUrlPattern, setRouteUrlPattern] = useState("");
+  const [routePriority, setRoutePriority] = useState(1);
+  const [routeError, setRouteError] = useState("");
+  const [wasPublished, setWasPublished] = useState(false); // track if form was ever published
   /* Load existing form if editing */
  /* Load existing form if editing */
 useEffect(() => {
@@ -78,14 +104,58 @@ useEffect(() => {
       const form: FormSummary = await formApi.get(id);
       setFormTitle(form.title);
       setFormDesc(form.description);
+      setWasPublished(form.status === "published");
+      try {
+        const targets = await targetApi.list(id);
+        const firstTarget = targets[0];
+
+        if (firstTarget) {
+          setTargetId(firstTarget.id);
+          setTargetEnabled(firstTarget.isActive);
+          setTargetUrl(firstTarget.targetUrl);
+          setTargetMethod(firstTarget.httpMethod);
+          setTargetHeadersText(JSON.stringify(firstTarget.headers ?? {}, null, 2));
+          setTargetMappingText(
+            JSON.stringify(
+              firstTarget.mapping ?? {
+                fieldMap: {},
+                staticValues: {
+                  source: "form-builder",
+                },
+              },
+              null,
+              2,
+            ),
+          );
+        }
+      } catch (err) {
+        console.error("Failed to load target", err);
+      }
 
       try {
-        const published: any = await formApi.getPublishedVersion(id);
-        const schema = published?.schemaJson ?? published?.schema_json ?? {};
-        const schemaFields = Array.isArray(schema.fields) ? schema.fields : [];
+        const routes = await routeApi.list(id);
+        const firstRoute = routes[0];
 
-        const mappedFields: LocalField[] = schemaFields.map((f: any, index: number) => ({
-          localId: f.id ?? `${f.fieldKey ?? "field"}-${index}`,
+        if (firstRoute) {
+          setRouteId(firstRoute.id);
+          setRouteEnabled(firstRoute.isActive);
+          setRouteMatchType(firstRoute.matchType);
+          setRouteUrlPattern(firstRoute.urlPattern);
+          setRoutePriority(firstRoute.priority ?? 1);
+        }
+      } catch (err) {
+        console.error("Failed to load route", err);
+      }
+
+      // IMPORTANT:
+      // Load editable draft fields first, not only the published snapshot.
+      // Before this, Save Draft looked like it did not save because the builder
+      // always reloaded the old published version.
+      const editableFields = Array.isArray(form.fields) ? form.fields : [];
+
+      if (editableFields.length > 0) {
+        const mappedFields: LocalField[] = editableFields.map((f: any, index: number) => ({
+          localId: f.id ?? `field-${index}`,
           backendId: f.id,
           type:
             f.type === "textarea"
@@ -108,16 +178,54 @@ useEffect(() => {
           label: f.label ?? "Untitled Question",
           placeholder: f.placeholder ?? "",
           required: !!f.required,
-          options: Array.isArray(f.optionsJson)
-            ? f.optionsJson.map((o: any) => o.label ?? o.value ?? "")
-            : Array.isArray(f.options)
-            ? f.options.map((o: any) => o.label ?? o.value ?? o)
+          options: Array.isArray(f.options)
+            ? f.options.map((o: any) => (typeof o === "string" ? o : o.label ?? o.value ?? ""))
             : ["Option 1", "Option 2"],
         }));
 
         setFields(mappedFields);
-      } catch {
-        setFields([]);
+      } else {
+        // Fallback only for old records that do not have editable form_fields rows.
+        try {
+          const published: any = await formApi.getPublishedVersion(id);
+          const schema = published?.schemaJson ?? published?.schema_json ?? {};
+          const schemaFields = Array.isArray(schema.fields) ? schema.fields : [];
+
+          const mappedFields: LocalField[] = schemaFields.map((f: any, index: number) => ({
+            localId: f.id ?? `${f.fieldKey ?? "field"}-${index}`,
+            backendId: f.id,
+            type:
+              f.type === "textarea"
+                ? "long"
+                : f.type === "text"
+                ? "text"
+                : f.type === "email"
+                ? "text"
+                : f.type === "phone"
+                ? "text"
+                : f.type === "radio"
+                ? "radio"
+                : f.type === "checkbox"
+                ? "checkbox"
+                : f.type === "date"
+                ? "date"
+                : f.type === "file"
+                ? "file"
+                : "text",
+            label: f.label ?? "Untitled Question",
+            placeholder: f.placeholder ?? "",
+            required: !!f.required,
+            options: Array.isArray(f.optionsJson)
+              ? f.optionsJson.map((o: any) => o.label ?? o.value ?? "")
+              : Array.isArray(f.options)
+              ? f.options.map((o: any) => o.label ?? o.value ?? o)
+              : ["Option 1", "Option 2"],
+          }));
+
+          setFields(mappedFields);
+        } catch {
+          setFields([]);
+        }
       }
     } catch {
       // leave blank for new form / invalid id
@@ -189,10 +297,89 @@ useEffect(() => {
 
   /* Save / Publish */
   /* Save / Publish */
+/* Save / Publish */
 const mapUiTypeToBackend = (type: string) => {
   if (type === "long") return "textarea";
   if (type === "short") return "text";
   return type;
+};
+
+const saveTargetConfig = async (formId: string) => {
+  setTargetError("");
+
+  const cleanTargetUrl = targetUrl.trim();
+
+  // If no URL is entered, skip target saving.
+  if (!cleanTargetUrl) {
+    return;
+  }
+
+  let parsedHeaders: Record<string, string> = {};
+  let parsedMapping: FormTarget["mapping"] = {
+    fieldMap: {},
+    staticValues: {
+      source: "form-builder",
+    },
+  };
+
+  try {
+    parsedHeaders = JSON.parse(targetHeadersText || "{}");
+  } catch {
+    throw new Error("Target headers must be valid JSON.");
+  }
+
+  try {
+    parsedMapping = JSON.parse(targetMappingText || "{}");
+  } catch {
+    throw new Error("Target mapping must be valid JSON.");
+  }
+
+  const payload: Omit<FormTarget, "id" | "formId"> = {
+    targetType: "webhook",
+    httpMethod: targetMethod,
+    targetUrl: cleanTargetUrl,
+    headers: parsedHeaders,
+    mapping: parsedMapping,
+    isActive: targetEnabled,
+    priority: 1,
+  };
+
+  if (targetId) {
+    const updated = await targetApi.update(targetId, payload);
+    setTargetId(updated.id);
+  } else {
+    const created = await targetApi.create(formId, payload);
+    setTargetId(created.id);
+  }
+};
+
+const saveRouteConfig = async (formId: string) => {
+  setRouteError("");
+
+  const cleanUrlPattern = routeUrlPattern.trim();
+
+  // If no URL pattern is entered, skip route saving.
+  if (!cleanUrlPattern) {
+    return;
+  }
+
+  const payload: Omit<FormRoute, "id" | "formId"> = {
+    siteId: null,
+    matchType: routeMatchType,
+    urlPattern: cleanUrlPattern,
+    priority: Number.isFinite(routePriority) ? routePriority : 1,
+    isActive: routeEnabled,
+    startAt: null,
+    endAt: null,
+  };
+
+  if (routeId) {
+    const updated = await routeApi.update(routeId, payload);
+    setRouteId(updated.id);
+  } else {
+    const created = await routeApi.create(formId, payload);
+    setRouteId(created.id);
+  }
 };
 
 const saveFormAndFields = async (publishAfter = false) => {
@@ -202,10 +389,19 @@ const saveFormAndFields = async (publishAfter = false) => {
   try {
     let formId = id;
 
+    const cleanTitle = formTitle.trim() || "Untitled Form";
+    const cleanDescription = formDesc.trim();
+    const shouldStayPublished = wasPublished && !publishAfter;
     const formPayload = {
-      title: formTitle || "Untitled Form",
-      description: formDesc,
-      status: publishAfter ? "active" : "draft",
+      name: cleanTitle,
+      title: cleanTitle,
+      description: cleanDescription,
+      status: publishAfter || shouldStayPublished ? "published" : "draft",
+      isActive: publishAfter || shouldStayPublished,
+    } as Partial<FormSummary> & {
+      name: string;
+      status: "published" | "draft";
+      isActive: boolean;
     };
 
     if (formId) {
@@ -214,7 +410,13 @@ const saveFormAndFields = async (publishAfter = false) => {
       const created = await formApi.create({
         ...formPayload,
         slug: `form-${Date.now()}`,
+      } as Partial<FormSummary> & {
+        slug: string;
+        name: string;
+        status: "published" | "draft";
+        isActive: boolean;
       });
+
       formId = created.id;
     }
 
@@ -226,8 +428,12 @@ const saveFormAndFields = async (publishAfter = false) => {
       const f = fields[i];
 
       const fieldPayload = {
-        fieldKey: f.backendId ? `field_${i + 1}` : `field_${Date.now()}_${i + 1}`,
-        label: f.label,
+        fieldKey: f.backendId
+          ? f.localId.startsWith("field_")
+            ? f.localId
+            : `field_${i + 1}`
+          : `field_${Date.now()}_${i + 1}`,
+        label: f.label.trim() || "Untitled Question",
         type: mapUiTypeToBackend(f.type),
         placeholder: f.placeholder ?? "",
         required: !!f.required,
@@ -249,36 +455,60 @@ const saveFormAndFields = async (publishAfter = false) => {
         setFields((prev) =>
           prev.map((pf) =>
             pf.localId === f.localId
-              ? { ...pf, backendId: createdField.id }
-              : pf
-          )
+              ? {
+                  ...pf,
+                  backendId: createdField.id,
+                  localId: createdField.fieldKey ?? fieldPayload.fieldKey,
+                }
+              : pf,
+          ),
         );
       }
     }
 
-    if (formId) {
-      await formApi.reorderFields(
-        formId,
-        fields
-          .filter((f) => f.backendId)
-          .map((f, index) => ({
-            fieldId: f.backendId as string,
-            sortOrder: index + 1,
-          }))
-      );
-    }
+    await formApi.reorderFields(
+      formId,
+      fields
+        .filter((f) => f.backendId)
+        .map((f, index) => ({
+          fieldId: f.backendId as string,
+          sortOrder: index + 1,
+        })),
+    );
 
-    if (publishAfter && formId) {
+    await saveTargetConfig(formId);
+    await saveRouteConfig(formId);
+
+    // IMPORTANT:
+    // Save Draft stops here.
+    // Only Publish calls the version publish endpoint.
+    if (publishAfter) {
       await formApi.publish(formId);
+      setWasPublished(true);
       setPublished(true);
+    } else {
+      setPublished(false);
+      navigate("/forms");
     }
 
-    if (!id && formId) {
+    if (!id && formId && publishAfter) {
       navigate(`/builder/${formId}`, { replace: true });
     }
   } catch (err: any) {
     console.error(err);
-    setSaveError(err?.message ?? "Failed to save form");
+    const message = err?.message ?? "Failed to save form";
+    setSaveError(message);
+
+    if (
+      message.includes("Target headers") ||
+      message.includes("Target mapping")
+    ) {
+      setTargetError(message);
+    }
+
+    if (message.includes("Route")) {
+      setRouteError(message);
+    }
   } finally {
     setSaving(false);
   }
@@ -290,6 +520,37 @@ const handleSave = async () => {
 
 const handlePublish = async () => {
   await saveFormAndFields(true);
+};
+
+const handleUnpublish = async () => {
+  if (!id) return;
+
+  const ok = window.confirm(
+    "Unpublish this form? The public URL and resolver will stop showing it until you publish again.",
+  );
+
+  if (!ok) return;
+
+  setSaving(true);
+  setSaveError("");
+
+  try {
+    const cleanTitle = formTitle.trim() || "Untitled Form";
+
+    await formApi.update(id, {
+      title: cleanTitle,
+      description: formDesc.trim(),
+      status: "draft",
+    });
+
+    setWasPublished(false);
+    navigate("/forms");
+  } catch (err: any) {
+    console.error(err);
+    setSaveError(err?.message ?? "Failed to unpublish form");
+  } finally {
+    setSaving(false);
+  }
 };
 
   /* ── static styles ── */
@@ -369,6 +630,16 @@ const handlePublish = async () => {
         </div>
         <div style={{ display:"flex", gap:8, alignItems:"center" }}>
           {saveError && <span style={{ fontSize:12, color:"#ef4444" }}>{saveError}</span>}
+          {wasPublished && id && (
+            <button
+              style={{ padding:"7px 16px", borderRadius:9, border:"1.5px solid #fca5a5", background:"#fef2f2", color:"#ef4444", fontSize:13, cursor:"pointer", fontFamily:"inherit", fontWeight:600 }}
+              onClick={handleUnpublish}
+              disabled={saving}
+              title="Turn this published form back into a draft and hide the public URL"
+            >
+              Unpublish
+            </button>
+          )}
           <button style={{ padding:"7px 16px", borderRadius:9, border:"1.5px solid #e0e0e0", background:"#fff", color:"#555", fontSize:13, cursor:"pointer", fontFamily:"inherit" }} onClick={handleSave} disabled={saving}>
             {saving ? "Saving…" : "Save Draft"}
           </button>
@@ -387,6 +658,221 @@ const handlePublish = async () => {
               <input style={{ width:"100%", border:"none", background:"transparent", fontSize:14, fontWeight:600, color:"#1a1a1a", outline:"none", padding:"2px 0", marginBottom:4, fontFamily:"inherit" }} placeholder="Form title…" value={formTitle} onChange={e=>setFormTitle(e.target.value)} />
               <textarea style={{ width:"100%", border:"none", background:"transparent", fontSize:12, color:"#888", outline:"none", padding:"2px 0", resize:"none", fontFamily:"inherit" }} placeholder="Description (optional)" value={formDesc} rows={2} onChange={e=>setFormDesc(e.target.value)} />
             </div>
+
+            <span style={sLabel}>Submit Target</span>
+            <div style={metaBox}>
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: "#333",
+                  marginBottom: 10,
+                }}
+              >
+                Enable target
+                <Switch
+                  size="small"
+                  checked={targetEnabled}
+                  onChange={(checked) => setTargetEnabled(checked)}
+                />
+              </label>
+
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 12, color: "#777", marginBottom: 5 }}>
+                  Target URL
+                </div>
+                <input
+                  value={targetUrl}
+                  onChange={(e) => setTargetUrl(e.target.value)}
+                  placeholder="https://webhook.site/..."
+                  style={sInput}
+                />
+              </div>
+
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 12, color: "#777", marginBottom: 5 }}>
+                  HTTP Method
+                </div>
+                <select
+                  value={targetMethod}
+                  onChange={(e) =>
+                    setTargetMethod(e.target.value as FormTarget["httpMethod"])
+                  }
+                  style={{ ...sInput, cursor: "pointer" }}
+                >
+                  <option value="POST">POST</option>
+                  <option value="PUT">PUT</option>
+                  <option value="PATCH">PATCH</option>
+                </select>
+              </div>
+
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 12, color: "#777", marginBottom: 5 }}>
+                  Headers JSON
+                </div>
+                <textarea
+                  value={targetHeadersText}
+                  onChange={(e) => setTargetHeadersText(e.target.value)}
+                  rows={4}
+                  style={{
+                    ...sInput,
+                    fontFamily: "monospace",
+                    resize: "vertical",
+                  }}
+                />
+              </div>
+
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 12, color: "#777", marginBottom: 5 }}>
+                  Mapping JSON
+                </div>
+                <textarea
+                  value={targetMappingText}
+                  onChange={(e) => setTargetMappingText(e.target.value)}
+                  rows={7}
+                  style={{
+                    ...sInput,
+                    fontFamily: "monospace",
+                    resize: "vertical",
+                  }}
+                />
+              </div>
+
+              {targetError && (
+                <div
+                  style={{
+                    background: "#fef2f2",
+                    color: "#dc2626",
+                    border: "1px solid #fecaca",
+                    padding: "8px 10px",
+                    borderRadius: 8,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    marginBottom: 8,
+                  }}
+                >
+                  {targetError}
+                </div>
+              )}
+
+              {targetId && (
+                <div
+                  style={{
+                    background: "#ecfdf5",
+                    color: "#16a34a",
+                    border: "1px solid #bbf7d0",
+                    padding: "8px 10px",
+                    borderRadius: 8,
+                    fontSize: 12,
+                    fontWeight: 600,
+                  }}
+                >
+                  Target saved
+                </div>
+              )}
+            </div>
+
+            <span style={sLabel}>Route Resolver</span>
+            <div style={metaBox}>
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: "#333",
+                  marginBottom: 10,
+                }}
+              >
+                Enable route
+                <Switch
+                  size="small"
+                  checked={routeEnabled}
+                  onChange={(checked) => setRouteEnabled(checked)}
+                />
+              </label>
+
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 12, color: "#777", marginBottom: 5 }}>
+                  Match Type
+                </div>
+                <select
+                  value={routeMatchType}
+                  onChange={(e) =>
+                    setRouteMatchType(e.target.value as FormRoute["matchType"])
+                  }
+                  style={{ ...sInput, cursor: "pointer" }}
+                >
+                  <option value="exact">Exact</option>
+                  <option value="prefix">Prefix</option>
+                  <option value="contains">Contains</option>
+                  <option value="regex">Regex</option>
+                </select>
+              </div>
+
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 12, color: "#777", marginBottom: 5 }}>
+                  URL Pattern
+                </div>
+                <input
+                  value={routeUrlPattern}
+                  onChange={(e) => setRouteUrlPattern(e.target.value)}
+                  placeholder="https://example.com/contact or contact"
+                  style={sInput}
+                />
+              </div>
+
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 12, color: "#777", marginBottom: 5 }}>
+                  Priority
+                </div>
+                <input
+                  type="number"
+                  value={routePriority}
+                  onChange={(e) => setRoutePriority(Number(e.target.value) || 1)}
+                  min={1}
+                  style={sInput}
+                />
+              </div>
+
+              {routeError && (
+                <div
+                  style={{
+                    background: "#fef2f2",
+                    color: "#dc2626",
+                    border: "1px solid #fecaca",
+                    padding: "8px 10px",
+                    borderRadius: 8,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    marginBottom: 8,
+                  }}
+                >
+                  {routeError}
+                </div>
+              )}
+
+              {routeId && (
+                <div
+                  style={{
+                    background: "#ecfdf5",
+                    color: "#16a34a",
+                    border: "1px solid #bbf7d0",
+                    padding: "8px 10px",
+                    borderRadius: 8,
+                    fontSize: 12,
+                    fontWeight: 600,
+                  }}
+                >
+                  Route saved
+                </div>
+              )}
+            </div>
+
             <span style={sLabel}>Add Field</span>
             {FIELD_TYPES.map(ft=>(
               <button key={ft.type}
