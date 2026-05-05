@@ -38,6 +38,8 @@ export default function Forms(): ReactElement {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [deleting, setDeleting] = useState<string | null>(null);
+  // ── NEW: track which form id was just copied ──
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -129,6 +131,15 @@ export default function Forms(): ReactElement {
         ),
       );
     }
+  };
+
+  // ── NEW: copy public link to clipboard ──
+  const handleCopyLink = (form: FormSummary) => {
+    const link = `${window.location.origin}/f/${form.slug}`;
+    navigator.clipboard.writeText(link).then(() => {
+      setCopiedId(form.id);
+      setTimeout(() => setCopiedId(null), 2500);
+    });
   };
 
   const filtered = forms.filter((f) =>
@@ -300,6 +311,21 @@ export default function Forms(): ReactElement {
     };
   };
 
+  // ── NEW: Copy Link button style ──
+  const copyLinkBtn = (copied: boolean): React.CSSProperties => ({
+    padding: "4px 12px",
+    borderRadius: 7,
+    border: `1.5px solid ${copied ? "#16a34a" : "#22c55e"}`,
+    background: copied ? "#edfcf2" : "#f0fdf4",
+    color: copied ? "#16a34a" : "#22c55e",
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: "pointer",
+    fontFamily: "inherit",
+    marginRight: 6,
+    transition: "all 0.2s",
+  });
+
   return (
     <div style={root}>
       <div style={topRow}>
@@ -409,6 +435,17 @@ export default function Forms(): ReactElement {
                   </td>
 
                   <td style={tdStyle}>
+                    {/* ── NEW: Copy Link — only for published forms ── */}
+                    {normalizeStatus(f.status) === "published" && (
+                      <button
+                        style={copyLinkBtn(copiedId === f.id)}
+                        onClick={() => handleCopyLink(f)}
+                        title={`Copy: ${window.location.origin}/f/${f.slug}`}
+                      >
+                        {copiedId === f.id ? "✓ Copied!" : "🔗 Copy Link"}
+                      </button>
+                    )}
+
                     <button
                       style={editBtn}
                       onClick={() => navigate(`/builder/${f.id}`)}
